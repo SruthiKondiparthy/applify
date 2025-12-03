@@ -1,6 +1,11 @@
 # tests/test_ai_engine.py
 
 import json
+import sys
+from pathlib import Path
+
+# Add repo root to Python path
+sys.path.append(str(Path(__file__).resolve().parent.parent))
 from api.ai_engine import AIEngine
 
 def main():
