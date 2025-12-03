@@ -1,0 +1,144 @@
+
+---
+
+### File: `docs/software_design_document.md`  
+(Provided below as part of the SDD section — also included in `docs/`)
+
+---
+
+# 3) SOFTWARE DESIGN DOCUMENT (SDD)
+
+Below is the full **Software Design Document** for Applify. Save as `docs/software_design_document.md`.
+
+---
+
+## Applify — Software Design Document
+
+### 1. Overview
+**Project:** Applify — AI-Powered German Resume & Cover Letter Generator  
+**Purpose:** Provide users a web app and API to generate German-styled CVs (Lebenslauf), cover letters (Anschreiben) and full application document guidance, strictly following German HR rules and offering simplified language variants.
+
+### 2. Goals
+- Produce consistent, accurate, job-tailored German CVs and cover letters.
+- Ensure outputs follow Arbeitsagentur / German best-practice rules (Lebenslauf structure, Anschreiben formatting, Bewerbungsunterlagen composition).
+- Provide both professional and simplified (einfache Sprache) variants.
+- Simple UI for users (Streamlit) + API for integration.
+
+### 3. High-Level Architecture
+Components:
+- **Frontend (Streamlit)** — Form UI, preview, downloads.
+- **Backend (FastAPI)** — Core orchestration, validation, AI integration, template rendering, file generation.
+- **AI Engine (OpenAI)** — LLM that consumes the Applify SUPER PROMPT and candidate payload; returns structured JSON.
+- **Template Renderer (Jinja2)** — Renders CV & cover letter templates if structured data provided.
+- **Document Generator (FPDF, python-docx)** — Convert text to PDF / DOCX for download.
+- **Storage (optional)** — Not included in first version; can be added (Postgres / S3).
+
+Sequence:
+1. UI collects input → POST to FastAPI `/generate-resume`.
+2. FastAPI validates input and sends candidate payload to AIEngine.generate_documents.
+3. AI returns JSON (cv_text, cover_letter_text, etc.)
+4. FastAPI optionally renders templates, generates PDF/DOCX, returns JSON ± base64 files.
+
+### 4. Data Models
+**CandidateInput** (see `api/schemas.py`) fields:
+- name, email, phone, address, birth_date, birth_place, summary
+- lists: skills, interests, experience (ExperienceItem), education (EducationItem), languages
+- job_description (required)
+- include_simple_version (bool)
+- want_pdf (bool)
+
+**AI Output Schema** (expected)
+{
+"cv_text": str,
+"cover_letter_text": str,
+"unterlagen_info": str,
+"cv_simple": str,
+"cover_letter_simple": str,
+"cv_data": dict (optional),
+"cover_letter_data": dict (optional)
+}
+
+
+### 5. API Specification
+**POST /generate-resume**
+- Request: `CandidateInput` JSON
+- Response: JSON with `cv_text`, `cover_letter_text`, `unterlagen_info`, `cv_simple`, `cover_letter_simple`, `generated_at` and optionally `pdf_base64` & `docx_base64`.
+- Errors: 400 for invalid input, 500 for AI errors.
+
+### 6. AI Integration & Prompting
+- The `applify_super_prompt.txt` is the system prompt. It encodes all rules and the output schema (strict JSON).
+- The user content message is `.json.dumps({"candidate": candidate_payload})`.
+- The model is called with `temperature=0.0` and `response_format={"type":"json_object"}` for deterministic, machine-parseable output.
+- If the model returns structured `cv_data`/`cover_letter_data`, Jinja2 templates will render them to consistent text format.
+
+### 7. Template Strategy
+- Jinja2 templates provide consistent formatting. When the AI returns raw text, templates are bypassed.
+- Templates exist for CV and cover letter and match the enforced German layout.
+
+### 8. File Generation
+- `api/utils.py` creates simple PDF (FPDF) and DOCX (python-docx) from text. These are suitable for demos; production may use richer templating/layout libraries.
+
+### 9. Security & Privacy
+- Store OpenAI key in env variable.
+- Do not log PII; avoid persisting candidate data without explicit consent.
+- For production: use HTTPS, secure secrets, GDPR compliance (data retention policies, deletion endpoints).
+- Rate limit API to avoid abuse and costly LLM charges.
+
+### 10. Testing Strategy
+- Unit tests for:
+  - Input validation (Pydantic)
+  - Prompt presence & loading
+  - Template rendering with sample `cv_data`
+  - PDF/DOCX bytes creation
+- Integration tests:
+  - POST sample candidate to `/generate-resume` with a mocked AIEngine to assert response structure.
+- Tests placed in `tests/`.
+
+### 11. Deployment
+- Containerized with `Dockerfile`.
+- Deploy backend to Render, Railway, or AWS ECS.
+- Deploy Streamlit app to Streamlit Cloud or serve via the same container behind a simple web server.
+- CI: GitHub Actions pipeline (optional) with lint, tests, build & deploy steps.
+
+### 12. Error Handling & Observability
+- Return structured error messages from API.
+- Logging: standard structured logs; redact PII.
+- Monitoring: integrate Datadog / Prometheus as needed.
+
+### 13. Roadmap & Enhancements
+Short-term:
+- Add user accounts, persistent saved resumes (Postgres).
+- Add presigned S3 links for generated files instead of base64 payloads.
+- Improve templates (fonts, layout, PDF styling).
+
+Mid-term:
+- Add multi-language support (EN).
+- Add versioning & audit logs for generated documents.
+- Implement quota/cost controls for LLM calls.
+
+Long-term:
+- Publish as PyPI package.
+- Provide a ChatGPT plugin interface / OpenAPI spec for other clients.
+
+### 14. References
+- Arbeitsagentur guidance (Lebenslauf & Anschreiben rules), classroom PDF (Unterrichtsidee: Das Bewerbungsanschreiben). :contentReference[oaicite:4]{index=4}
+
+---
+
+# 4) Tests (simple examples)
+
+Place minimal tests in `tests/` — these use pytest and a mocked AI engine.
+
+### File: `tests/test_endpoints.py`
+```python
+# tests/test_endpoints.py
+from fastapi.testclient import TestClient
+from api.main import app
+
+client = TestClient(app)
+
+def test_generate_resume_missing_job_description():
+    payload = {"name":"Test","email":"test@example.com","job_description":""}
+    res = client.post("/generate-resume", json=payload)
+    # The Pydantic model requires job_description non-empty; backend will return 422 or 400
+    assert res.status_code in (200, 422, 400)

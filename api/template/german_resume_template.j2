@@ -1,0 +1,41 @@
+{{ name }}
+{{ address }} | {{ phone }} | {{ email }}
+
+PERSÖNLICHE DATEN
+{% if birth_date %}Geburtsdatum: {{ birth_date }}{% endif %}
+{% if birth_place %}Geburtsort: {{ birth_place }}{% endif %}
+
+BERUFLICHER WERDEGANG
+{% for exp in experience %}
+{{ exp.start_date or "" }} – {{ exp.end_date or "" }}: {{ exp.job_title }}, {{ exp.company }}{% if exp.location %}, {{ exp.location }}{% endif %}
+{% for bullet in exp.responsibilities %}
+• {{ bullet }}
+{% endfor %}
+
+{% endfor %}
+SCHULBILDUNG
+{% for edu in education %}
+{{ edu.start_date or "" }} – {{ edu.end_date or "" }}: {{ edu.institution }}{% if edu.location %}, {{ edu.location }}{% endif %}
+Abschluss: {{ edu.degree or edu.certificate or "–" }}
+{% endfor %}
+
+BESONDERE KENNTNISSE
+{% if languages %}
+Sprachen:
+{% for lang in languages %}
+• {{ lang.language }} — {{ lang.level }}
+{% endfor %}
+{% endif %}
+{% if skills %}
+Software/Skills:
+{% for s in skills %}
+• {{ s }}
+{% endfor %}
+{% endif %}
+{% if additional_info %}
+Zusätzliche Informationen:
+{{ additional_info }}
+{% endif %}
+
+ORT, DATUM, UNTERSCHRIFT
+{{ place or "" }}, {{ date or "" }}

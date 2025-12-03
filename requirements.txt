@@ -1,0 +1,32 @@
+# --- Core Backend ---
+fastapi==0.115.0
+uvicorn==0.30.6
+pydantic==2.7.4
+python-dotenv==1.0.1
+
+# --- Streamlit Frontend ---
+streamlit==1.36.0
+
+# --- LLM Providers ---
+openai==1.50.0               # used for DeepSeek + OpenAI fallback
+google-generativeai==0.7.2   # Gemini API
+
+# --- Utils & Templates ---
+jinja2==3.1.3
+
+# --- Resume Parsing / PDFs ---
+pdfplumber==0.11.0
+PyMuPDF==1.24.6
+python-docx==1.1.0
+reportlab==4.2.0
+fpdf==1.7.2
+
+# --- File Handling ---
+python-multipart==0.0.9
+
+# --- CORS ---
+starlette==0.37.2
+
+# --- Optional (if you use any logging or retry logic) ---
+tenacity==8.5.0
+
