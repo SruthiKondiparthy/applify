@@ -1,106 +1,306 @@
 # app/ui.py
 import streamlit as st
 import requests
+import pdfplumber
+import docx
+from io import BytesIO
 import base64
 import json
-import os
+import re
 
-API_URL = os.getenv("APPLIFY_API_URL", "http://localhost:8000/generate-resume")
+# ========== CONFIG ==========
+API_URL = st.secrets.get("APPLIFY_API_URL", "http://localhost:8000/generate-resume")
+# If you store it in .env or Streamlit secrets, it will be picked up.
+# ============================
 
-st.set_page_config(page_title="Applify", page_icon="📝", layout="centered")
-st.title("Applify — Create professional German CVs & cover letters in one click.")
+st.set_page_config(page_title="Applify — CV & Cover Letter", layout="wide")
+st.title("🇩🇪 Applify — AI German CV & Cover Letter Generator")
 
-with st.form("candidate_form"):
-    st.header("Candidate information")
-    name = st.text_input("Name")
-    email = st.text_input("Email")
-    phone = st.text_input("Phone")
-    address = st.text_input("Address")
-    birth_date = st.text_input("Birth date (MM/YYYY)")
-    birth_place = st.text_input("Birth place")
-    summary = st.text_area("Profile summary (short)")
-    skills = st.text_area("Skills (comma separated)")
-    interests = st.text_area("Interests (comma separated)")
+# Initialize session state for dynamic lists
+if "experience" not in st.session_state:
+    st.session_state.experience = []
+if "education" not in st.session_state:
+    st.session_state.education = []
+if "parsed_resume_text" not in st.session_state:
+    st.session_state.parsed_resume_text = ""
+if "parsed_payload" not in st.session_state:
+    st.session_state.parsed_payload = None
+if "output_language" not in st.session_state:
+    st.session_state.output_language = "de"  # default German
 
-    st.header("Experience (optional)")
-    exp_json = st.text_area("Paste experience as JSON list (optional). Example format:\n[{'job_title':'Dev','company':'X','start_date':'01/2022','end_date':'07/2023','location':'Berlin','responsibilities':['...']}]")
-
-    st.header("Education (optional)")
-    edu_json = st.text_area("Paste education as JSON list (optional)")
-
-    st.header("Job description (paste full text)")
-    job_description = st.text_area("Job description", height=200)
-
-    include_simple = st.checkbox("Also generate einfache Sprache versions", value=False)
-    want_pdf = st.checkbox("Return PDF/DOCX (base64)", value=False)
-
-    submitted = st.form_submit_button("Generate")
-
-if submitted:
-    payload = {
-        "name": name,
-        "email": email,
-        "phone": phone,
-        "address": address,
-        "birth_date": birth_date,
-        "birth_place": birth_place,
-        "summary": summary,
-        "skills": [s.strip() for s in skills.split(",") if s.strip()],
-        "interests": [s.strip() for s in interests.split(",") if s.strip()],
-        "experience": [],
-        "education": [],
-        "languages": [],
-        "additional_info": "",
-        "job_description": job_description,
-        "include_simple_version": include_simple,
-        "want_pdf": want_pdf
-    }
-
-    # Try parse JSON fields if provided
-    if exp_json:
+# Helpers: extract text from uploaded file
+def extract_text_from_file(uploaded):
+    if not uploaded:
+        return ""
+    name = uploaded.name.lower()
+    if name.endswith(".pdf"):
         try:
-            payload["experience"] = json.loads(exp_json)
-        except Exception:
-            st.error("Invalid JSON for experience")
-    if edu_json:
+            with pdfplumber.open(uploaded) as pdf:
+                return "\n".join((p.extract_text() or "") for p in pdf.pages)
+        except Exception as e:
+            st.error(f"Failed to extract PDF text: {e}")
+            return ""
+    elif name.endswith(".docx"):
         try:
-            payload["education"] = json.loads(edu_json)
-        except Exception:
-            st.error("Invalid JSON for education")
+            doc = docx.Document(uploaded)
+            return "\n".join(p.text for p in doc.paragraphs)
+        except Exception as e:
+            st.error(f"Failed to extract DOCX text: {e}")
+            return ""
+    else:
+        return uploaded.getvalue().decode("utf-8", errors="ignore")
 
-    st.info("Sending your data to Applify backend...")
-    try:
-        res = requests.post(API_URL, json=payload, timeout=120)
-        if res.status_code != 200:
-            st.error(f"Backend error: {res.text}")
+# Helper: try to prefill top-level fields from parsed payload
+def autofill_from_parsed(parsed):
+    if not parsed:
+        return
+    # top-level fields
+    if parsed.get("name") and not st.session_state.get("name"):
+        st.session_state.name = parsed.get("name")
+    if parsed.get("email") and not st.session_state.get("email"):
+        st.session_state.email = parsed.get("email")
+    if parsed.get("phone") and not st.session_state.get("phone"):
+        st.session_state.phone = parsed.get("phone")
+    if parsed.get("address") and not st.session_state.get("address"):
+        st.session_state.address = parsed.get("address")
+    if parsed.get("summary") and not st.session_state.get("summary"):
+        st.session_state.summary = parsed.get("summary")
+
+    # experience list
+    parsed_exp = parsed.get("experience") or parsed.get("work_experience") or []
+    if parsed_exp and not st.session_state.experience:
+        # normalize to expected keys
+        for e in parsed_exp:
+            st.session_state.experience.append({
+                "job_title": e.get("job_title") or e.get("title") or e.get("role") or "",
+                "company": e.get("company") or e.get("employer") or "",
+                "start_date": e.get("start_date") or e.get("from") or "",
+                "end_date": e.get("end_date") or e.get("to") or "",
+                "location": e.get("location") or "",
+                "responsibilities": e.get("responsibilities") or e.get("description") or []
+            })
+
+    # education list
+    parsed_edu = parsed.get("education") or []
+    if parsed_edu and not st.session_state.education:
+        for ed in parsed_edu:
+            st.session_state.education.append({
+                "institution": ed.get("institution") or ed.get("school") or "",
+                "degree": ed.get("degree") or ed.get("qualification") or "",
+                "start_date": ed.get("start_date") or "",
+                "end_date": ed.get("end_date") or "",
+                "location": ed.get("location") or "",
+                "note": ed.get("note") or ""
+            })
+
+    # skills & languages
+    if parsed.get("skills") and not st.session_state.get("skills"):
+        st.session_state.skills = parsed.get("skills")
+    if parsed.get("languages") and not st.session_state.get("languages"):
+        st.session_state.languages = parsed.get("languages")
+
+# UI layout: sidebar for inputs and upload
+with st.sidebar:
+    st.header("Your details")
+    # Top-level inputs with session_state binding
+    name = st.text_input("Full name", value=st.session_state.get("name", ""))
+    email = st.text_input("Email", value=st.session_state.get("email", ""))
+    phone = st.text_input("Phone", value=st.session_state.get("phone", ""))
+    address = st.text_area("Address", value=st.session_state.get("address", ""), height=80)
+    summary = st.text_area("Professional summary", value=st.session_state.get("summary", ""), height=120)
+
+    st.markdown("---")
+    st.subheader("Language / Output")
+    lang = st.radio("Target language for generated documents", options=["de", "en"], index=0 if st.session_state.output_language=="de" else 1, format_func=lambda x: "German (Deutsch)" if x=="de" else "English")
+    st.session_state.output_language = lang
+
+    st.markdown("---")
+    st.subheader("Resume Upload (PDF / DOCX)")
+    uploaded_file = st.file_uploader("Upload your existing resume to auto-fill", type=["pdf", "docx", "txt"])
+
+    # Controls for parsing and generation
+    st.markdown("---")
+    want_pdf = st.checkbox("Provide downloadable PDF/DOCX", value=True)
+    st.markdown("Click parse to extract and fill the form before generating.")
+    parse_button = st.button("Parse Resume" if uploaded_file else "Parse (no file)", type="primary")
+    generate_button_sidebar = st.button("Generate (from sidebar)")
+
+# MAIN: two-column layout
+left_col, right_col = st.columns([1, 1], gap="large")
+
+# LEFT: dynamic form for experience / education
+with left_col:
+    st.subheader("Work Experience")
+    # Add / remove controls
+    c1, c2 = st.columns([1, 1])
+    if c1.button("➕ Add experience"):
+        st.session_state.experience.append({
+            "job_title": "",
+            "company": "",
+            "start_date": "",
+            "end_date": "",
+            "location": "",
+            "responsibilities": []
+        })
+    if c2.button("➖ Remove last experience"):
+        if st.session_state.experience:
+            st.session_state.experience.pop()
+
+    # render each experience item
+    for i, exp in enumerate(st.session_state.experience):
+        st.markdown(f"**Experience #{i+1}**")
+        exp_job = st.text_input(f"Job title {i+1}", value=exp.get("job_title",""), key=f"job_title_{i}")
+        exp_company = st.text_input(f"Company {i+1}", value=exp.get("company",""), key=f"company_{i}")
+        exp_start = st.text_input(f"Start (MM/YYYY) {i+1}", value=exp.get("start_date",""), key=f"start_{i}")
+        exp_end = st.text_input(f"End (MM/YYYY or 'Present') {i+1}", value=exp.get("end_date",""), key=f"end_{i}")
+        exp_loc = st.text_input(f"Location {i+1}", value=exp.get("location",""), key=f"loc_{i}")
+        exp_desc = st.text_area(f"Responsibilities (comma separated) {i+1}", value=", ".join(exp.get("responsibilities") if isinstance(exp.get("responsibilities"), list) else [exp.get("responsibilities") or ""]), key=f"res_{i}", height=80)
+
+        # update back to session_state
+        st.session_state.experience[i]["job_title"] = exp_job
+        st.session_state.experience[i]["company"] = exp_company
+        st.session_state.experience[i]["start_date"] = exp_start
+        st.session_state.experience[i]["end_date"] = exp_end
+        st.session_state.experience[i]["location"] = exp_loc
+        # store responsibilities as list
+        st.session_state.experience[i]["responsibilities"] = [s.strip() for s in re.split(r",|\n", exp_desc) if s.strip()]
+
+    st.markdown("---")
+    st.subheader("Education")
+    c3, c4 = st.columns([1,1])
+    if c3.button("➕ Add education"):
+        st.session_state.education.append({
+            "institution": "",
+            "degree": "",
+            "start_date": "",
+            "end_date": "",
+            "location": "",
+            "note": ""
+        })
+    if c4.button("➖ Remove last education"):
+        if st.session_state.education:
+            st.session_state.education.pop()
+
+    for i, edu in enumerate(st.session_state.education):
+        st.markdown(f"**Education #{i+1}**")
+        inst = st.text_input(f"Institution {i+1}", value=edu.get("institution",""), key=f"inst_{i}")
+        deg = st.text_input(f"Degree {i+1}", value=edu.get("degree",""), key=f"deg_{i}")
+        ed_start = st.text_input(f"Start (MM/YYYY) {i+1}", value=edu.get("start_date",""), key=f"edstart_{i}")
+        ed_end = st.text_input(f"End (MM/YYYY) {i+1}", value=edu.get("end_date",""), key=f"edend_{i}")
+        ed_loc = st.text_input(f"Location {i+1}", value=edu.get("location",""), key=f"edloc_{i}")
+        note = st.text_area(f"Note {i+1}", value=edu.get("note",""), key=f"ednote_{i}", height=60)
+
+        st.session_state.education[i]["institution"] = inst
+        st.session_state.education[i]["degree"] = deg
+        st.session_state.education[i]["start_date"] = ed_start
+        st.session_state.education[i]["end_date"] = ed_end
+        st.session_state.education[i]["location"] = ed_loc
+        st.session_state.education[i]["note"] = note
+
+with right_col:
+    st.subheader("Skills, Languages & Job Description")
+    skills_input = st.text_input("Skills (comma separated)", value=",".join(st.session_state.get("skills", [])))
+    languages_input = st.text_input("Languages (comma separated)", value=",".join(st.session_state.get("languages", [])))
+    job_description = st.text_area("Job Description (paste full job ad or leave empty)", value=st.session_state.get("job_description",""), height=200)
+
+    # update session_state
+    st.session_state.skills = [s.strip() for s in skills_input.split(",") if s.strip()]
+    st.session_state.languages = [l.strip() for l in languages_input.split(",") if l.strip()]
+    st.session_state.job_description = job_description
+
+    st.markdown("---")
+    st.subheader("Preview / Actions")
+
+    # Show parsed resume text preview area
+    if st.session_state.parsed_resume_text:
+        st.info("Parsed resume text available (from uploaded file). You can still edit fields above before generating.")
+        st.text_area("Parsed resume (raw)", value=st.session_state.parsed_resume_text, height=160)
+
+    # Parse resume (uses existing generate endpoint to parse)
+    if parse_button:
+        if uploaded_file:
+            st.session_state.parsed_resume_text = extract_text_from_file(uploaded_file)
+            if not st.session_state.parsed_resume_text:
+                st.warning("No text was extracted from the uploaded file.")
+            else:
+                # send parsed text to backend to extract structured fields
+                with st.spinner("Parsing resume using Applify..."):
+                    payload = {
+                        "name": st.session_state.get("name",""),
+                        "email": st.session_state.get("email",""),
+                        "phone": st.session_state.get("phone",""),
+                        "address": st.session_state.get("address",""),
+                        "summary": st.session_state.get("summary",""),
+                        "experience": st.session_state.experience,
+                        "education": st.session_state.education,
+                        "skills": st.session_state.get("skills", []),
+                        "languages": st.session_state.get("languages", []),
+                        "job_description": st.session_state.get("job_description",""),
+                        "parsed_resume_text": st.session_state.parsed_resume_text,
+                        # instruct backend to parse and return structured fields (non-final)
+                        "parse_only": True,
+                    }
+                    try:
+                        r = requests.post(API_URL, json=payload, timeout=60)
+                        if r.status_code != 200:
+                            st.error(f"Parsing failed: {r.text}")
+                        else:
+                            data = r.json()
+                            # Expect backend to return parsed structure inside "parsed" or top-level fields
+                            parsed = data.get("parsed") or data.get("parsed_payload") or data
+                            st.session_state.parsed_payload = parsed
+                            autofill_from_parsed(parsed)
+                            st.success("Resume parsed and form auto-filled. Please review/edit fields before generating.")
+                    except Exception as e:
+                        st.error(f"Failed to call backend for parsing: {e}")
+
         else:
-            data = res.json()
-            st.success("Generated!")
-            st.subheader("Lebenslauf (CV)")
-            st.code(data.get("cv_text",""), language="text")
-            st.subheader("Anschreiben (Cover Letter)")
-            st.code(data.get("cover_letter_text",""), language="text")
-            st.subheader("Unterlagen (What to include)")
-            st.text(data.get("unterlagen_info",""))
-            if include_simple:
-                st.subheader("Lebenslauf (einfache Sprache)")
-                st.code(data.get("cv_simple",""), language="text")
-                st.subheader("Anschreiben (einfache Sprache)")
-                st.code(data.get("cover_letter_simple",""), language="text")
+            st.warning("Please upload a PDF or DOCX file first to parse.")
 
-            if want_pdf and data.get("pdf_base64"):
-                st.download_button(
-                    label="Download combined PDF",
-                    data=base64.b64decode(data["pdf_base64"]),
-                    file_name=f"applify_{name.replace(' ', '_')}.pdf",
-                    mime="application/pdf"
-                )
-                st.download_button(
-                    label="Download combined DOCX",
-                    data=base64.b64decode(data["docx_base64"]),
-                    file_name=f"applify_{name.replace(' ', '_')}.docx",
-                    mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-                )
+    # Generate final CV & Cover Letter
+    if generate_button_sidebar:
+        # Build final payload from session state
+        final_payload = {
+            "name": name or st.session_state.get("name",""),
+            "email": email or st.session_state.get("email",""),
+            "phone": phone or st.session_state.get("phone",""),
+            "address": address or st.session_state.get("address",""),
+            "summary": summary or st.session_state.get("summary",""),
+            "experience": st.session_state.experience,
+            "education": st.session_state.education,
+            "skills": st.session_state.get("skills", []),
+            "languages": st.session_state.get("languages", []),
+            "job_description": st.session_state.get("job_description",""),
+            "parsed_resume_text": st.session_state.parsed_resume_text,
+            "include_simple_version": True,
+            "output_language": st.session_state.output_language,
+            "want_pdf": want_pdf
+        }
+        with st.spinner("Generating CV and Cover Letter..."):
+            try:
+                r = requests.post(API_URL, json=final_payload, timeout=120)
+                if r.status_code != 200:
+                    st.error(f"Generation failed: {r.text}")
+                else:
+                    out = r.json()
+                    # show outputs
+                    st.success("Generation complete!")
+                    st.subheader("CV Preview")
+                    st.markdown(out.get("cv_text",""))
+                    st.subheader("Cover Letter Preview")
+                    st.markdown(out.get("cover_letter_text",""))
 
-    except Exception as e:
-        st.exception(e)
+                    # downloads
+                    if want_pdf and out.get("pdf_base64"):
+                        pdf_bytes = base64.b64decode(out["pdf_base64"])
+                        st.download_button("Download PDF", data=pdf_bytes, file_name="applify_output.pdf", mime="application/pdf")
+                    if want_pdf and out.get("docx_base64"):
+                        docx_bytes = base64.b64decode(out["docx_base64"])
+                        st.download_button("Download DOCX", data=docx_bytes, file_name="applify_output.docx", mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document")
+
+            except Exception as e:
+                st.error(f"Error while generating: {e}")
+
+# Also allow generate from main area
+if st.button("Generate (main)"):
+    st.experimental_rerun()
